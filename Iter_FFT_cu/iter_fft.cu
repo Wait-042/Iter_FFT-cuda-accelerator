@@ -5,7 +5,7 @@
 #include <iomanip>
 #include <chrono>
 #include <fstream>
-
+#include <nvtx3/nvToolsExt.h>
 #include "system_error_generate.cuh"
 #include "zernike_fitting.cuh"
 #include "frequency_analysis.cuh"
@@ -14,12 +14,6 @@
 #define CEIL(a, b) (((a) + (b) - 1) / (b))
 #define M_PI 3.14159265358979323846
 
-// 错误检查宏
-#define CUDA_CHECK(err) \
-    if (err != cudaSuccess) { \
-        std::cerr << "CUDA Error: " << cudaGetErrorString(err) << " at line " << __LINE__ << std::endl; \
-        exit(EXIT_FAILURE); \
-    }
 
 #define CUBLAS_CHECK(err) \
     if (err != CUBLAS_STATUS_SUCCESS) { \
@@ -40,11 +34,11 @@ void save_raw(const std::string& filename, const std::vector<T>& data) {
         size_t total_bytes = data.size() * sizeof(T);
         file.write(reinterpret_cast<const char*>(data.data()), total_bytes);
         file.close();
-        std::cout << "成功保存到 " << filename
-            << " (大小: " << total_bytes / (1024.0 * 1024.0) << " MB)" << std::endl;
+        std::cout << "save successful " << filename
+            << " (file size: " << total_bytes / (1024.0 * 1024.0) << " MB)" << std::endl;
     }
     else {
-        std::cerr << "错误：无法打开文件 " << filename << " 进行写入！" << std::endl;
+        std::cerr << "err: can't open file " << filename << " to write!" << std::endl;
     }
 
 }
@@ -192,58 +186,58 @@ template <typename T>
 void iter_fft_2d(Rect rect_sel[2], T* d_img, T* d_pinv, T* d_zernike_basis, T* d_rho, T rho_range_fit, int* d_mask_indices, int M, int n_order, int iter_num, int* h_M, int start_mode, int end_mode,
     T* d_a_corr, T* d_bx_corr, T* d_by_corr, T* d_phix_corr, T* d_phiy_corr) {
 
-    auto start1 = std::chrono::high_resolution_clock::now();
+    nvtxRangePushA("memory allocate");
 
     int total_pixes = M * M;
 
     T* d_a_fft, * d_bx_fft, * d_by_fft, * d_phix_fft, * d_phiy_fft;
-    cudaMalloc(&d_a_fft, total_pixes * sizeof(T));
-    cudaMalloc(&d_bx_fft, total_pixes * sizeof(T));
-    cudaMalloc(&d_by_fft, total_pixes * sizeof(T));
-    cudaMalloc(&d_phix_fft, total_pixes * sizeof(T));
-    cudaMalloc(&d_phiy_fft, total_pixes * sizeof(T));
+    CUDA_CHECK(cudaMalloc(&d_a_fft, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc(&d_bx_fft, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc(&d_by_fft, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc(&d_phix_fft, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc(&d_phiy_fft, total_pixes * sizeof(T)));
 
     T* d_a_model, * d_bx_model, * d_by_model, * d_phix_model, * d_phiy_model;
-    cudaMalloc((void**)&d_a_model, total_pixes * sizeof(T));
-    cudaMalloc((void**)&d_bx_model, total_pixes * sizeof(T));
-    cudaMalloc((void**)&d_by_model, total_pixes * sizeof(T));
-    cudaMalloc((void**)&d_phix_model, total_pixes * sizeof(T));
-    cudaMalloc((void**)&d_phiy_model, total_pixes * sizeof(T));
+    CUDA_CHECK(cudaMalloc((void**)&d_a_model, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc((void**)&d_bx_model, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc((void**)&d_by_model, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc((void**)&d_phix_model, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc((void**)&d_phiy_model, total_pixes * sizeof(T)));
 
     T* d_a_fft_model, * d_bx_fft_model, * d_by_fft_model, * d_phix_fft_model, * d_phiy_fft_model;
-    cudaMalloc((void**)&d_a_fft_model, total_pixes * sizeof(T));
-    cudaMalloc((void**)&d_bx_fft_model, total_pixes * sizeof(T));
-    cudaMalloc((void**)&d_by_fft_model, total_pixes * sizeof(T));
-    cudaMalloc((void**)&d_phix_fft_model, total_pixes * sizeof(T));
-    cudaMalloc((void**)&d_phiy_fft_model, total_pixes * sizeof(T));
+    CUDA_CHECK(cudaMalloc((void**)&d_a_fft_model, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc((void**)&d_bx_fft_model, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc((void**)&d_by_fft_model, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc((void**)&d_phix_fft_model, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc((void**)&d_phiy_fft_model, total_pixes * sizeof(T)));
 
     T* d_delta_a, * d_delta_bx, * d_delta_by, * d_delta_phix, * d_delta_phiy;
-    cudaMalloc((void**)&d_delta_a, total_pixes * sizeof(T));
-    cudaMalloc((void**)&d_delta_bx, total_pixes * sizeof(T));
-    cudaMalloc((void**)&d_delta_by, total_pixes * sizeof(T));
-    cudaMalloc((void**)&d_delta_phix, total_pixes * sizeof(T));
-    cudaMalloc((void**)&d_delta_phiy, total_pixes * sizeof(T));
+    CUDA_CHECK(cudaMalloc((void**)&d_delta_a, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc((void**)&d_delta_bx, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc((void**)&d_delta_by, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc((void**)&d_delta_phix, total_pixes * sizeof(T)));
+    CUDA_CHECK(cudaMalloc((void**)&d_delta_phiy, total_pixes * sizeof(T)));
+    nvtxRangePop();
 
-    auto start2 = std::chrono::high_resolution_clock::now();
-
+    nvtxRangePushA("1st fft extract");
     envelope_phi_by_fft_2d<T>(d_img, M, M, rect_sel, d_a_fft, d_bx_fft, d_by_fft, d_phix_fft, d_phiy_fft);
+    nvtxRangePop();
 
-    auto start3 = std::chrono::high_resolution_clock::now();
-
+    nvtxRangePushA("zernike filter");
     zernike_low_pass_filter<T>(d_a_fft, d_a_model, d_pinv, d_zernike_basis, d_rho, rho_range_fit, d_mask_indices, M, M, n_order, h_M, start_mode, end_mode);
     zernike_low_pass_filter<T>(d_bx_fft, d_bx_model, d_pinv, d_zernike_basis, d_rho, rho_range_fit, d_mask_indices, M, M, n_order, h_M, start_mode, end_mode);
     zernike_low_pass_filter<T>(d_by_fft, d_by_model, d_pinv, d_zernike_basis, d_rho, rho_range_fit, d_mask_indices, M, M, n_order, h_M, start_mode, end_mode);
     zernike_low_pass_filter<T>(d_phix_fft, d_phix_model, d_pinv, d_zernike_basis, d_rho, rho_range_fit, d_mask_indices, M, M, n_order, h_M, start_mode, end_mode);
     zernike_low_pass_filter<T>(d_phiy_fft, d_phiy_model, d_pinv, d_zernike_basis, d_rho, rho_range_fit, d_mask_indices, M, M, n_order, h_M, start_mode, end_mode);
-    auto start4 = std::chrono::high_resolution_clock::now();
+    nvtxRangePop();
 
     dim3 cor_threads(16, 16);
     dim3 cor_blocks(CEIL(M, 16), CEIL(M, 16));
     img_generate_2d<T> << <cor_blocks, cor_threads >> > (d_img, d_rho, d_a_model, d_bx_model, d_by_model, d_phix_model, d_phiy_model, M);
-    auto start5 = std::chrono::high_resolution_clock::now();
-
+    
+    nvtxRangePushA("2nd fft extract");
     envelope_phi_by_fft_2d<T>(d_img, M, M, rect_sel, d_a_fft_model, d_bx_fft_model, d_by_fft_model, d_phix_fft_model, d_phiy_fft_model);
-    auto start6 = std::chrono::high_resolution_clock::now();
+    nvtxRangePop();
 
     subtract_kernel<T> << <CEIL(total_pixes, 512), 512 >> > (d_a_fft_model, d_a_model, d_delta_a, total_pixes);
     subtract_kernel<T> << <CEIL(total_pixes, 512), 512 >> > (d_bx_fft_model, d_bx_model, d_delta_bx, total_pixes);
@@ -256,9 +250,9 @@ void iter_fft_2d(Rect rect_sel[2], T* d_img, T* d_pinv, T* d_zernike_basis, T* d
     subtract_kernel<T> << <CEIL(total_pixes, 512), 512 >> > (d_by_fft, d_delta_by, d_by_corr, total_pixes);
     subtract_kernel<T> << <CEIL(total_pixes, 512), 512 >> > (d_phix_fft, d_delta_phix, d_phix_corr, total_pixes);
     subtract_kernel<T> << <CEIL(total_pixes, 512), 512 >> > (d_phiy_fft, d_delta_phiy, d_phiy_corr, total_pixes);
-    auto start7 = std::chrono::high_resolution_clock::now();
 
     for (int i = 0; i < iter_num; i++) {
+        nvtxRangePushA("iter_loop_step");
         zernike_low_pass_filter<T>(d_a_corr, d_a_model, d_pinv, d_zernike_basis, d_rho, rho_range_fit, d_mask_indices, M, M, n_order, h_M, start_mode, end_mode);
         zernike_low_pass_filter<T>(d_bx_corr, d_bx_model, d_pinv, d_zernike_basis, d_rho, rho_range_fit, d_mask_indices, M, M, n_order, h_M, start_mode, end_mode);
         zernike_low_pass_filter<T>(d_by_corr, d_by_model, d_pinv, d_zernike_basis, d_rho, rho_range_fit, d_mask_indices, M, M, n_order, h_M, start_mode, end_mode);
@@ -280,8 +274,9 @@ void iter_fft_2d(Rect rect_sel[2], T* d_img, T* d_pinv, T* d_zernike_basis, T* d
         subtract_kernel<T> << <CEIL(total_pixes, 512), 512 >> > (d_by_fft, d_delta_by, d_by_corr, total_pixes);
         subtract_kernel<T> << <CEIL(total_pixes, 512), 512 >> > (d_phix_fft, d_delta_phix, d_phix_corr, total_pixes);
         subtract_kernel<T> << <CEIL(total_pixes, 512), 512 >> > (d_phiy_fft, d_delta_phiy, d_phiy_corr, total_pixes);
+        nvtxRangePop();
+
     }
-    auto start8 = std::chrono::high_resolution_clock::now();
 
     cudaFree(d_a_fft);
     cudaFree(d_bx_fft);
@@ -304,57 +299,13 @@ void iter_fft_2d(Rect rect_sel[2], T* d_img, T* d_pinv, T* d_zernike_basis, T* d
     cudaFree(d_delta_by);
     cudaFree(d_delta_phix);
     cudaFree(d_delta_phiy);
-    auto start9 = std::chrono::high_resolution_clock::now();
 
-    auto duration1 = std::chrono::duration_cast<std::chrono::milliseconds>(start2 - start1);
-    auto duration2 = std::chrono::duration_cast<std::chrono::milliseconds>(start3 - start2);
-    auto duration3 = std::chrono::duration_cast<std::chrono::milliseconds>(start4 - start3);
-    auto duration4 = std::chrono::duration_cast<std::chrono::milliseconds>(start5 - start4);
-    auto duration5 = std::chrono::duration_cast<std::chrono::milliseconds>(start6 - start5);
-    auto duration6 = std::chrono::duration_cast<std::chrono::milliseconds>(start7 - start6);
-    auto duration7 = std::chrono::duration_cast<std::chrono::milliseconds>(start8 - start7);
-    auto duration8 = std::chrono::duration_cast<std::chrono::milliseconds>(start9 - start8);
-    auto duration9 = std::chrono::duration_cast<std::chrono::milliseconds>(start9 - start1);
-
-    //std::cout << "内存分配耗时: " << duration1.count() << " ms" << std::endl;
-    //std::cout << "envelope_phi_by_fft_2d耗时: " << duration2.count() << " ms" << std::endl;
-    //std::cout << "zernike低通滤波耗时: " << duration3.count() << " ms" << std::endl;
-    //std::cout << "图像恢复耗时: " << duration4.count() << " ms" << std::endl;
-    //std::cout << "envelope_phi_by_fft_2d耗时: " << duration5.count() << " ms" << std::endl;
-    //std::cout << "修正耗时: " << duration6.count() << " ms" << std::endl;
-    //std::cout << "迭代修正耗时: " << duration7.count() << " ms" << std::endl;
-    //std::cout << "内存释放耗时: " << duration8.count() << " ms" << std::endl;
-    //std::cout << "整体程序耗时: " << duration9.count() << " ms" << std::endl;
-
-}
-
-template <typename T>
-void coordinate_generate_kernel_test(void) {
-    using Real = T;
-    int M = 2048;
-    int img_pixes = M * M;
-
-    const Real spot_radius_nm = 9e6;
-    const Real pixel_size_nm = 10e3;
-    Real cmos_radius = M * pixel_size_nm / 2.0;
-
-    Real* d_rho, * d_theta;
-    cudaMalloc((void**)&d_rho, img_pixes * sizeof(Real));
-    cudaMalloc((void**)&d_theta, img_pixes * sizeof(Real));
-
-    ////////////////////////// rho theta generate ///////////////////////////
-    dim3 cor_threads(16, 16);
-    dim3 cor_blocks(CEIL(M, 16), CEIL(M, 16));
-    Real norm_val = static_cast<Real>(cmos_radius / spot_radius_nm);
-    Real step = static_cast<Real>(2.0) * norm_val / (M - 1);
-    coordinate_generate_kernel<Real> << <cor_blocks, cor_threads >> > (M, norm_val, step, d_rho, d_theta);
-
-    cudaFree(d_rho);
-    cudaFree(d_theta);
 }
 
 
 int main(void) {
+    nvtxRangePushA("MainLoop");
+    nvtxRangePushA("memory allocate");
     auto start1 = std::chrono::high_resolution_clock::now();
 
     using Real = double;
@@ -379,48 +330,53 @@ int main(void) {
     std::vector<Real> zernike_basis(N_ORDER * img_pixes);
 
     Real* d_rho, * d_theta, * d_zernike_basis;
-    cudaMalloc((void**)&d_rho, img_pixes * sizeof(Real));
-    cudaMalloc((void**)&d_theta, img_pixes * sizeof(Real));
-    cudaMalloc((void**)&d_zernike_basis, N_ORDER * img_pixes * sizeof(Real));
+    CUDA_CHECK(cudaMalloc((void**)&d_rho, img_pixes * sizeof(Real)));
+    CUDA_CHECK(cudaMalloc((void**)&d_theta, img_pixes * sizeof(Real)));
+    CUDA_CHECK(cudaMalloc((void**)&d_zernike_basis, N_ORDER * img_pixes * sizeof(Real)));
 
     Real* d_phi_x, * d_phi_y;
-    cudaMalloc((void**)&d_phi_x, img_pixes * sizeof(Real));
-    cudaMalloc((void**)&d_phi_y, img_pixes * sizeof(Real));
+    CUDA_CHECK(cudaMalloc((void**)&d_phi_x, img_pixes * sizeof(Real)));
+    CUDA_CHECK(cudaMalloc((void**)&d_phi_y, img_pixes * sizeof(Real)));
 
     Real* d_img_2d, * d_a, * d_b;
-    cudaMalloc(&d_img_2d, img_pixes * sizeof(Real));
-    cudaMalloc(&d_a, img_pixes * sizeof(Real));
-    cudaMalloc(&d_b, img_pixes * sizeof(Real));
+    CUDA_CHECK(cudaMalloc(&d_img_2d, img_pixes * sizeof(Real)));
+    CUDA_CHECK(cudaMalloc(&d_a, img_pixes * sizeof(Real)));
+    CUDA_CHECK(cudaMalloc(&d_b, img_pixes * sizeof(Real)));
 
     Real* d_aa_corr, * d_bx_corr, * d_by_corr, * d_phix_corr, * d_phiy_corr;
-    cudaMalloc((void**)&d_aa_corr, img_pixes * sizeof(Real));
-    cudaMalloc((void**)&d_bx_corr, img_pixes * sizeof(Real));
-    cudaMalloc((void**)&d_by_corr, img_pixes * sizeof(Real));
-    cudaMalloc((void**)&d_phix_corr, img_pixes * sizeof(Real));
-    cudaMalloc((void**)&d_phiy_corr, img_pixes * sizeof(Real));
+    CUDA_CHECK(cudaMalloc((void**)&d_aa_corr, img_pixes * sizeof(Real)));
+    CUDA_CHECK(cudaMalloc((void**)&d_bx_corr, img_pixes * sizeof(Real)));
+    CUDA_CHECK(cudaMalloc((void**)&d_by_corr, img_pixes * sizeof(Real)));
+    CUDA_CHECK(cudaMalloc((void**)&d_phix_corr, img_pixes * sizeof(Real)));
+    CUDA_CHECK(cudaMalloc((void**)&d_phiy_corr, img_pixes * sizeof(Real)));
+    nvtxRangePop();
 
     auto start2 = std::chrono::high_resolution_clock::now();
-
+    
     ////////////////////////// rho theta generate ///////////////////////////
     dim3 cor_threads(16, 16);
     dim3 cor_blocks(CEIL(M, 16), CEIL(M, 16));
     Real norm_val = static_cast<Real>(cmos_radius / spot_radius_nm);
     Real step = static_cast<Real>(2.0) * norm_val / (M - 1);
+
+    nvtxRangePushA("Preheat");
+    coordinate_generate_kernel<Real> << <cor_blocks, cor_threads >> > (M, norm_val, step, d_rho, d_theta);
+    nvtxRangePop();
+
+    nvtxRangePushA("phase image generate");
     coordinate_generate_kernel<Real> << <cor_blocks, cor_threads >> > (M, norm_val, step, d_rho, d_theta);
 
     ////////////////////////// sys_phi ///////////////////////////
-    dim3 sys_threads(16, 16);
-    dim3 sys_blocks(CEIL(M, 16), CEIL(M, 16));
-
     system_error_generate<Real>(cmos_radius, ddx, ddy, ddz, scale_factor, d_phi_x, d_phi_y, M);
 
     ////////////////////////// img generate ///////////////////////////
     fill_kernel<Real> << <CEIL(img_pixes, 512), 512 >> > (d_a, static_cast<Real>(1.0), img_pixes);
     fill_kernel<Real> << <CEIL(img_pixes, 512), 512 >> > (d_b, static_cast<Real>(1.0), img_pixes);
     img_generate_2d<Real> << <cor_blocks, cor_threads >> > (d_img_2d, d_rho, d_a, d_b, d_b, d_phi_x, d_phi_y, M);
+    nvtxRangePop();
 
     auto start3 = std::chrono::high_resolution_clock::now();
-
+    nvtxRangePushA("zernike basis generate");
     ////////////////////////// zernike_basis_generate ///////////////////////////
     if (mix_precision) {
         generate_zernike_basis_optimized<Real, true>(d_rho, d_theta, d_zernike_basis, M, M, N_ORDER, is_norm);
@@ -428,19 +384,25 @@ int main(void) {
     else {
         generate_zernike_basis_optimized<Real, false>(d_rho, d_theta, d_zernike_basis, M, M, N_ORDER, is_norm);
     }
-
+    nvtxRangePop();
     ////////////////////////// zernike_basis_pinv ///////////////////////////
     Real* d_pinv = nullptr;
     int h_M = 0;
     int* d_mask_indices = nullptr;
+
+    nvtxRangePushA("generate_mask");
     generate_mask<Real>(d_mask_indices, d_rho, rho_range_fit, M, M, &h_M);
+    nvtxRangePop();
+
+    nvtxRangePushA("zerk_pinv_generate");
     zerk_fit_pinv_generate_cuda<Real>(d_zernike_basis,
         d_rho, 
         d_mask_indices,
         N_ORDER, M, M,
         &d_pinv,
         &h_M);
-    
+    nvtxRangePop();
+
     auto start4 = std::chrono::high_resolution_clock::now();
 
     ////////////////////////// iter_fft ///////////////////////////
@@ -453,7 +415,10 @@ int main(void) {
     rect_sel[1] = { 974, 1074, 1074, 1174 };
     rect_sel[2] = { 1074, 1174, 974, 1074 };
 
+    nvtxRangePushA("iter_fft_2d");
     iter_fft_2d<Real>(rect_sel, d_img_2d, d_pinv, d_zernike_basis, d_rho, rho_range_fit, d_mask_indices, M, N_ORDER, iter_num, &h_M, start_mode, end_mode, d_aa_corr, d_bx_corr, d_by_corr, d_phix_corr, d_phiy_corr);
+    nvtxRangePop();
+
     //std::vector<Real> aa_corr(img_pixes);
     //std::vector<Real> bx_corr(img_pixes);
     //std::vector<Real> by_corr(img_pixes);
@@ -469,8 +434,10 @@ int main(void) {
     //save_raw<Real>("by_corr_float64.bin", by_corr);
     //save_raw<Real>("phix_corr_float64.bin", phix_corr);
     //save_raw<Real>("phiy_corr_float64.bin", phiy_corr);
+
     auto start5 = std::chrono::high_resolution_clock::now();
 
+    nvtxRangePushA("memory release");
     cudaFree(d_img_2d);
     cudaFree(d_aa_corr);
     cudaFree(d_bx_corr);
@@ -487,7 +454,8 @@ int main(void) {
     cudaFree(d_phi_y);
     cudaFree(d_a);
     cudaFree(d_b);
-
+    nvtxRangePop();
+    nvtxRangePop();
     auto start6 = std::chrono::high_resolution_clock::now();
 
     auto duration1 = std::chrono::duration_cast<std::chrono::milliseconds>(start2 - start1);
@@ -497,12 +465,12 @@ int main(void) {
     auto duration5 = std::chrono::duration_cast<std::chrono::milliseconds>(start6 - start5);
     auto duration6= std::chrono::duration_cast<std::chrono::milliseconds>(start6 - start1);
 
-    std::cout << "内存分配耗时: " << duration1.count() << " ms" << std::endl;
-    std::cout << "相位、图像生成耗时: " << duration2.count() << " ms" << std::endl;
-    std::cout << "zernike基生成耗时: " << duration3.count() << " ms" << std::endl;
-    std::cout << "2d条纹迭代FFT提取相位耗时: " << duration4.count() << " ms" << std::endl;
-    std::cout << "内存释放耗时: " << duration5.count() << " ms" << std::endl;
-    std::cout << "整体程序耗时: " << duration6.count() << " ms" << std::endl;
+    std::cout << "memory allocate: " << duration1.count() << " ms" << std::endl;
+    std::cout << "phase image generate: " << duration2.count() << " ms" << std::endl;
+    std::cout << "zernike basis generate: " << duration3.count() << " ms" << std::endl;
+    std::cout << "iter FFT extract phase: " << duration4.count() << " ms" << std::endl;
+    std::cout << "memory release: " << duration5.count() << " ms" << std::endl;
+    std::cout << "total times: " << duration6.count() << " ms" << std::endl;
 
     return 0;
 }

@@ -5,7 +5,8 @@
 #include "unwrap_phase_hybrid.cuh"
 #include <iostream>
 #include <iomanip>
-#include <chrono>
+#include <nvtx3/nvToolsExt.h>
+
 #pragma comment(lib, "cufft.lib")
 
 #ifndef M_PI
@@ -182,7 +183,6 @@ void envelope_phi_by_fft_1d(
     process_envelope_b_and_phi_kernel<T> << <blocksPerGrid, threadsPerBlock >> > (d_fft_b, d_envelope_b, d_phi, size, fft_scale);
     
     // 9. 使用 Herraez 2D 算法（skimage 同款）在 CPU 进行解包裹
-    auto start4 = std::chrono::high_resolution_clock::now();
 
     std::vector<T> h_phi(size);
     std::vector<T> h_phi_unwrap(size);
@@ -192,9 +192,6 @@ void envelope_phi_by_fft_1d(
     unwrap_phase_gpu_hybrid<T>(h_phi.data(), h_phi_unwrap.data(), width, height);
 
     cudaMemcpy(d_phi, h_phi_unwrap.data(), size * sizeof(T), cudaMemcpyHostToDevice);
-    auto start5 = std::chrono::high_resolution_clock::now();
-    auto duration4 = std::chrono::duration_cast<std::chrono::milliseconds>(start5 - start4);
-    //std::cout << "unwrap_herraez_2d耗时: " << duration4.count() << " ms" << std::endl;
 
     // 11. 释放 GPU 内存与 Plan
     cufftDestroy(plan);
@@ -216,8 +213,8 @@ void envelope_phi_by_fft_2d(
     T* d_phix,
     T* d_phiy
 ) {
+    nvtxRangePushA("memory allocate");
 
-    auto start1 = std::chrono::high_resolution_clock::now();
     using ComplexType = typename CuFFTTraits<T>::Complex;
 
     int size = width * height;
@@ -229,24 +226,23 @@ void envelope_phi_by_fft_2d(
     cudaMalloc(&d_fft_a, complex_bytes);
     cudaMalloc(&d_fft_bx, complex_bytes);
     cudaMalloc(&d_fft_by, complex_bytes);
+    nvtxRangePop();
 
     // 2. 在 GPU 上将实数图像转为复数格式 
     int threadsPerBlock = 256;
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
     real_to_complex_kernel<T> << <blocksPerGrid, threadsPerBlock >> > (d_img, d_img_complex, size);
-    auto start2 = std::chrono::high_resolution_clock::now();
+
     // 3. 创建 CuFFT 句柄
     cufftHandle plan;
     cufftPlan2d(&plan, height, width, CuFFTTraits<T>::C2C_TYPE);
 
     // 4. 正向 2D FFT
     CuFFTTraits<T>::execC2C(plan, d_img_complex, d_img_complex, CUFFT_FORWARD);
-    auto start3 = std::chrono::high_resolution_clock::now();
     dim3 block2d(16, 16);
     dim3 grid2d_half((width / 2 + block2d.x - 1) / block2d.x, (height / 2 + block2d.y - 1) / block2d.y);
-
     fftshift_2d_kernel<T> << <grid2d_half, block2d >> > (d_img_complex, width, height);
-    auto start4 = std::chrono::high_resolution_clock::now();
+
     // 5. 过滤与 ROI 截取 (使用 2D 内存拷贝降低带宽开销)
     cudaMemset(d_fft_a, 0, complex_bytes);
     cudaMemset(d_fft_bx, 0, complex_bytes);
@@ -275,7 +271,7 @@ void envelope_phi_by_fft_2d(
         d_img_complex + rect_sel[2].y_min * width + rect_sel[2].x_min, width * sizeof(ComplexType),
         w_by * sizeof(ComplexType), h_by, cudaMemcpyDeviceToDevice
     );
-    auto start5 = std::chrono::high_resolution_clock::now();
+
     // 6. 逆 FFT (ifftshift -> IFFT)
     fftshift_2d_kernel<T> << <grid2d_half, block2d >> > (d_fft_a, width, height);
     fftshift_2d_kernel<T> << <grid2d_half, block2d >> > (d_fft_bx, width, height);
@@ -283,6 +279,7 @@ void envelope_phi_by_fft_2d(
     CuFFTTraits<T>::execC2C(plan, d_fft_a, d_fft_a, CUFFT_INVERSE);
     CuFFTTraits<T>::execC2C(plan, d_fft_bx, d_fft_bx, CUFFT_INVERSE);
     CuFFTTraits<T>::execC2C(plan, d_fft_by, d_fft_by, CUFFT_INVERSE);
+
     // 7. 提取包络与包裹相位 Phi (补齐缺失变量定义)
     T fft_scale = static_cast<T>(1.0) / static_cast<T>(width * height);
 
@@ -291,45 +288,18 @@ void envelope_phi_by_fft_2d(
     process_envelope_b_and_phi_kernel<T> << <blocksPerGrid, threadsPerBlock >> > (d_fft_by, d_envelope_by, d_phiy, size, fft_scale);
 
     // 9. 使用 Herraez 2D 算法（skimage 同款）在 CPU 进行解包裹
-    auto start6 = std::chrono::high_resolution_clock::now();
-
+    nvtxRangePushA("unwrap_phase");
     std::vector<T> h_phix(size), h_phiy(size);
     std::vector<T> h_phix_unwrap(size), h_phiy_unwrap(size);
     cudaMemcpy(h_phix.data(), d_phix, size * sizeof(T), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_phiy.data(), d_phiy, size * sizeof(T), cudaMemcpyDeviceToHost);
-    auto start7 = std::chrono::high_resolution_clock::now();
-
-    //unwrap_herraez_2d<T>(h_phix.data(), h_phix_unwrap.data(), width, height);
-    //unwrap_herraez_2d<T>(h_phiy.data(), h_phiy_unwrap.data(), width, height);
 
     unwrap_phase_gpu_hybrid<T>(h_phix.data(), h_phix_unwrap.data(), width, height);
     unwrap_phase_gpu_hybrid<T>(h_phiy.data(), h_phiy_unwrap.data(), width, height);
-    auto start8 = std::chrono::high_resolution_clock::now();
 
     cudaMemcpy(d_phix, h_phix_unwrap.data(), size * sizeof(T), cudaMemcpyHostToDevice);
     cudaMemcpy(d_phiy, h_phiy_unwrap.data(), size * sizeof(T), cudaMemcpyHostToDevice);
-
-    auto start9 = std::chrono::high_resolution_clock::now();
-
-    auto duration1 = std::chrono::duration_cast<std::chrono::milliseconds>(start2 - start1);
-    auto duration2 = std::chrono::duration_cast<std::chrono::milliseconds>(start3 - start2);
-    auto duration3 = std::chrono::duration_cast<std::chrono::milliseconds>(start4 - start3);
-    auto duration4 = std::chrono::duration_cast<std::chrono::milliseconds>(start5 - start4);
-    auto duration5 = std::chrono::duration_cast<std::chrono::milliseconds>(start6 - start5);
-    auto duration6 = std::chrono::duration_cast<std::chrono::milliseconds>(start7 - start6);
-    auto duration7 = std::chrono::duration_cast<std::chrono::milliseconds>(start8 - start7);
-    auto duration8 = std::chrono::duration_cast<std::chrono::milliseconds>(start9 - start8);
-    auto duration9 = std::chrono::duration_cast<std::chrono::milliseconds>(start9 - start1);
-
-    //std::cout << "内存分配耗时: " << duration1.count() << " ms" << std::endl;
-    //std::cout << "FFT耗时: " << duration2.count() << " ms" << std::endl;
-    //std::cout << "FFTSHIFT耗时: " << duration3.count() << " ms" << std::endl;
-    //std::cout << "频谱截取耗时: " << duration4.count() << " ms" << std::endl;
-    //std::cout << "逆变换耗时: " << duration5.count() << " ms" << std::endl;
-    //std::cout << "phi gpu->cpu耗时: " << duration6.count() << " ms" << std::endl;
-    //std::cout << "相位解包裹耗时: " << duration7.count() << " ms" << std::endl;
-    //std::cout << "phi cpu->gpu耗时: " << duration8.count() << " ms" << std::endl;
-    //std::cout << "整体程序耗时: " << duration9.count() << " ms" << std::endl;
+    nvtxRangePop();
 
     // 11. 释放 GPU 内存与 Plan
     cufftDestroy(plan);

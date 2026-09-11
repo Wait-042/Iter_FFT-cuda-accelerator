@@ -3,6 +3,7 @@
 #include <thrust/host_vector.h>
 #include <thrust/sort.h>
 #include <thrust/execution_policy.h>
+#include <nvtx3/nvToolsExt.h>
 
 #include <vector>
 #include <cmath>
@@ -11,7 +12,6 @@
 #include <numeric>
 #include <algorithm>
 #include <cstring>
-#include <chrono>
 
 #if defined(__GNUC__) || defined(__clang__)
     #define PREFETCH_READ(addr) __builtin_prefetch((addr), 0, 1)
@@ -227,6 +227,8 @@ void unwrap_phase_gpu_hybrid(
     const int V = (height - 1) * width;
     const int E = H + V;
 
+    nvtxRangePushA("memory allocate");
+
     // ---------- 设备内存分配 ----------
     T* d_phase, * d_reliability;
     CompactEdge* d_edges;
@@ -246,7 +248,9 @@ void unwrap_phase_gpu_hybrid(
     CUDA_CHECK(cudaEventCreate(&ev_after_sort));
     CUDA_CHECK(cudaEventCreate(&ev_after_copy));
     CUDA_CHECK(cudaEventRecord(ev_start));
+    nvtxRangePop();
 
+    nvtxRangePushA("cal reliability and build edges");
     // 1. 可靠性
     {
         dim3 block(32, 32);
@@ -264,12 +268,15 @@ void unwrap_phase_gpu_hybrid(
         CUDA_CHECK(cudaGetLastError());
     }
     CUDA_CHECK(cudaEventRecord(ev_after_build));
+    nvtxRangePop();
 
+    nvtxRangePushA("sort edges");
     // 3. 排序：改用非稳定排序 thrust::sort_by_key（利用键唯一性提升 GPU 排序效率）
     thrust::device_ptr<uint64_t> d_keys_ptr(d_keys);
     thrust::device_ptr<CompactEdge> d_edges_ptr(d_edges);
     thrust::sort_by_key(d_keys_ptr, d_keys_ptr + E, d_edges_ptr);
     CUDA_CHECK(cudaEventRecord(ev_after_sort));
+    nvtxRangePop();
 
     // 4. 拷贝排序后的紧凑结构体到主机（固定内存）
     CompactEdge* h_edges;
@@ -290,8 +297,7 @@ void unwrap_phase_gpu_hybrid(
     //printf("GPU Copy out (pinned, compact): %.2f ms\n", ms_copy);
 
     // ---------- 5. CPU 合并（极限优化版） ----------
-    auto cpu_start = std::chrono::high_resolution_clock::now();
-
+    nvtxRangePushA("DSU");
     FastDSU dsu(N);
     DSUNode* __restrict__ dsu_ptr = dsu.nodes.data();
     int merged_count = 0;
@@ -338,10 +344,6 @@ void unwrap_phase_gpu_hybrid(
         }
     }
 
-    auto cpu_end = std::chrono::high_resolution_clock::now();
-    auto cpu_ms = std::chrono::duration_cast<std::chrono::milliseconds>(cpu_end - cpu_start).count();
-    //printf("CPU Merge (optimized): %lld ms\n", (long long)cpu_ms);
-
     // 释放 pinned 内存
     cudaFreeHost(h_edges);
 
@@ -351,13 +353,17 @@ void unwrap_phase_gpu_hybrid(
         h_parent[i] = dsu.nodes[i].parent;
         h_offset[i] = dsu.nodes[i].offset;
     }
+    nvtxRangePop();
 
+    nvtxRangePushA("cudaMemcpyAsync unwrap_offset H2D");
     int* d_parent, * d_offset;
     CUDA_CHECK(cudaMalloc(&d_parent, N * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_offset, N * sizeof(int)));
     CUDA_CHECK(cudaMemcpy(d_parent, h_parent.data(), N * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_offset, h_offset.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+    nvtxRangePop();
 
+    nvtxRangePushA("apply_unwrap_kernel");
     T* d_unwrapped;
     CUDA_CHECK(cudaMalloc(&d_unwrapped, N * sizeof(T)));
     {
@@ -366,6 +372,8 @@ void unwrap_phase_gpu_hybrid(
         apply_unwrap_kernel<<<grid, block>>>(d_phase, d_unwrapped, d_parent, d_offset, N);
         CUDA_CHECK(cudaGetLastError());
     }
+    nvtxRangePop();
+
     CUDA_CHECK(cudaMemcpy(h_unwrapped, d_unwrapped, N * sizeof(T), cudaMemcpyDeviceToHost));
 
     // 清理资源
