@@ -1,10 +1,9 @@
 # Iter_FFT-cuda-accelerator
 
-## description
-A CUDA &amp; C++ accelerated version of Iter_FFT to extrcat 2D-fringe image phase. 
-Compared to the Python version, the CUDA version can be 10 times faster.
+## 介绍
+一个使用 CUDA 和 C++ 加速的迭代FFT提算法，用于提取二维条纹图像的相位。相比 Python numpy版本大约快15倍，比Python cupy版本快大约9倍。
 
-Work Environment:
+## 环境:
 ```
 Graphics Card: RTX 4070 Super
 
@@ -18,11 +17,7 @@ g++(Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
 ```
 
 ## quick start
-We provide both the Python NumPy version and the CuPy version of the algorithm, and you can switch between them using 
-the 'CUPY' parameter in cpnfig.py.
-The differences in results between Python versions and CUDA versions("Python and CUDA result diff.png") are in the Iter_FFT_py folder. 
-At the same time, the differences in the extracted envelope phase and ideal envelope phase using both the iterative FFT 
-algorithm and the regular FFT algorithm are also in that folder("diff between the results  FFT and Iter_FFT and the ideal values.png").
+我们提供了算法的 Python NumPy 版本和 CuPy 版本，你可以通过 config.py 中的 'CUPY' 参数在它们之间切换。
 
 ### Python
 ```
@@ -32,6 +27,16 @@ python iter_fft.py
 ```
 
 ### CUDA
+这是个优化版本，相比于旧版本做了内存分配优化以及一些细节调优
+```
+cd Iter_FFT_opt_cu
+mkdir -p build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc)
+./app
+```
+
+这是个旧版本
 ```
 cd Iter_FFT_cu
 mkdir -p build && cd build
@@ -41,20 +46,50 @@ make -j$(nproc)
 ```
 
 ## result
-Here is a comparison of the Top-3 time-consuming modules
 
-| module                     | numpy | cupy | CUDA  |
-|----------------------------|-------|------|-------|
-| zernike basis generate / s | 3.4   | 0.65 | 0.2   |
-| zernike low pass / s       | 1.3   | 0.23 | 0.045 |
-| phase unwrap / s           | 1.4   | 1.4  | 0.2   |
+Python 版本和 CUDA 版本的结果差异：
+![Python_and_CUDA_result_diff](Iter_FFT_py/Python_and_CUDA_result_diff.png)
 
-Here we notice that the phase unwrapping time is the same for both numpy and cupy because phase unwrapping is a highly serial algorithm. 
-In Python, it calls the third-party library skimage.restoration.unwrap_phase, which doesn’t support GPU acceleration. 
+同时，使用迭代 FFT 算法和普通 FFT 算法提取的包络相位与理想包络相位的差异:
+![diff_between_the_results_FFT_and_Iter_FFT_and_the_ideal_values.png](Iter_FFT_py/diff_between_the_results_FFT_and_Iter_FFT_and_the_ideal_values.png)
 
-So in the CUDA version, we optimized its C source code for CUDA, parallelizing the sorting and reliability map calculations, 
-while keeping the union-find merge operations running on the CPU.
 
-For the whole algorithm, our CUDA version is nearly 10 times faster compared to the numpy version. 
-Of course, phase unwrapping is still a relatively time-consuming operation, so the next step is to consider other ways 
-to parallelize phase unwrapping, or maybe use block-wise unwrapping (though that’s just an idea for now).
+核心模块耗时对比：
+
+| 核心耗时模块           | numpy    | cupy     | CUDA&C++  |
+|------------------|----------|----------|-----------|
+| zernike基生成 / s   | 2.1      | 0.08     | 0.01      |
+| zernike基伪逆生成 / s | 2        | 0.22     | 0.1       |
+| FFT变换 / s        | 0.4 * 7  | 0.02 * 7 | 0.01 * 7  |
+| zernike低通滤波 / s  | 1.25 * 6 | 0.08 * 6 | 0.03 * 6  |
+| 相位解包裹 / s        | 1.4 * 14 | 1.4 * 14 | 0.11 * 14 |
+| 其他 / s           | 0.4      | 0.02     | 0.43      |
+| 整体耗时 / s         | 34.4     | 20.54    | 2.33      |
+
+PS：表中 a * b 中a表示的是单次耗时，b是执行次数 
+
+这里注意到，相位展开的时间对于 numpy 和 cupy 来说是一样的，因为相位展开是一个高度串行的算法。
+在 Python 中，它调用了第三方库 skimage.restoration.unwrap_phase，而这个库不支持 GPU 加速。
+他是我们算法的核心耗时瓶颈，因为算法核心是一个高度串行化的路径寻优并查集算法
+
+在 CUDA 版本中，一开始我们尝试了用一个单线程去实现效果很差，运行完要几十s，后面尝试了了一种基于有限差分的快速傅里叶变换与离散余弦变换相位解包裹算法
+虽然该算法使得运行时间得到了明显降低，但是算法会把某些误差分散到全局，使得整体相位求解精度不够。
+
+后来我们阅读了 C 源码，识别到整个算法中除并查集外的部分如计算可靠性、排序、路径展开压缩和偏移量写回进行了 CUDA 优化，同时应用字节对齐、数据预取等手段优化数据访问，
+最终通过CPU+GPU混合解包裹流程将相位解包裹加速大约7倍
+
+同时，代码整体选用double类型是因为项目追求高精度的相位结果，使用float后精度会下降几个数量级，当然，当前算法耗时的瓶颈并不在数据类型上
+
+对于整个算法，我们的 CUDA 版本相比 numpy 版本快了将近 15 倍，相比 numpy 版本快了将近 9 倍，当然，相位解包裹仍然是一个相对耗时的操作，
+因为强数据依赖导致GPU资源没有得到充分利用
+
+## 参考
+
+- [NVIDIA Nsight Systems user guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html#)
+- [The User Guide for Nsight Compute](https://docs.nvidia.com/nsight-compute/NsightCompute/index.html#)
+- [CUDA Programming Guide](https://docs.nvidia.com/cuda/cuda-programming-guide/index.html)
+
+## 下一步计划
+
+- 考虑其他方式来并行化相位展开，或者可能使用分块展开（不过这现在只是个想法）
+- 选取ROI区域，减少解包裹数据量
